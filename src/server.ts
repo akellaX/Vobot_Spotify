@@ -1,11 +1,10 @@
-// src/server.ts
 import express, {Request, Response, NextFunction} from 'express';
 import axios from 'axios';
 import sharp from 'sharp';
 import dotenv from 'dotenv';
 import {URLSearchParams} from 'url';
-import * as bmp from 'bmp-js';
 
+const DEFAULT_USERID = 'vobot';
 
 dotenv.config();
 
@@ -43,7 +42,7 @@ const port = process.env.PORT || 3000;
 const tokenStore = new Map<string, TokenData>();
 
 const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
-    const userId = req.query.userId as string;
+    const userId = req.query.userId as string || DEFAULT_USERID;
     const tokens = tokenStore.get(userId);
 
     if (!userId || !tokens) {
@@ -65,7 +64,7 @@ app.get('/login', (req: Request, res: Response) => {
         response_type: 'code',
         redirect_uri: process.env.SPOTIFY_REDIRECT_URI!,
         scope: 'user-read-currently-playing',
-        state: req.query.userId as string || 'vobot-user'
+        state: req.query.userId as string || DEFAULT_USERID
     });
 
     res.redirect(`https://accounts.spotify.com/authorize?${params}`);
@@ -108,7 +107,7 @@ app.get('/callback', async (req: Request, res: Response) => {
 
 app.get('/current-track', authMiddleware, async (req: Request, res: Response<TrackResponse | { error: string }>) => {
     try {
-        const userId = req.query.userId as string;
+        const userId = req.query.userId as string || DEFAULT_USERID;
         const tokens = tokenStore.get(userId)!;
 
         const trackResponse = await axios.get<SpotifyTrackResponse>(
@@ -119,28 +118,19 @@ app.get('/current-track', authMiddleware, async (req: Request, res: Response<Tra
         const trackData = trackResponse.data;
         const artUrl = trackData.item.album.images[0].url;
 
-        // Get image data
+        // Get image data and process as JPG
         const imageResponse = await axios.get(artUrl, { responseType: 'arraybuffer' });
-
-        // Process with sharp
-        const { data, info } = await sharp(Buffer.from(imageResponse.data as any))
+        const jpgBuffer = await sharp(Buffer.from(imageResponse.data as any))
             .resize(320, 240)
-            .raw()
-            .toBuffer({ resolveWithObject: true });
+            .jpeg()
+            .toBuffer();
 
-        // Convert to BMP
-        const bmpData = bmp.encode({
-            data: Buffer.from(data),
-            width: info.width,
-            height: info.height
-        });
-
-        tokenStore.set(userId, { ...tokens, art: bmpData.data });
+        tokenStore.set(userId, { ...tokens, art: jpgBuffer });
 
         res.json({
             track: trackData.item.name,
             artist: trackData.item.artists[0].name,
-            art_url: `${req.protocol}://${req.get('host')}/art.bmp?userId=${userId}`
+            art_url: `${req.protocol}://${req.get('host')}/art.jpg?userId=${userId}`
         });
     } catch (error) {
         console.error('Track error:', error);
@@ -148,8 +138,8 @@ app.get('/current-track', authMiddleware, async (req: Request, res: Response<Tra
     }
 });
 
-app.get('/art.bmp', authMiddleware, (req: Request, res: Response) => {
-    const userId = req.query.userId as string;
+app.get('/art.jpg', authMiddleware, (req: Request, res: Response) => {
+    const userId = req.query.userId as string || DEFAULT_USERID;
     const art = tokenStore.get(userId)?.art;
 
     if (!art) {
@@ -157,10 +147,11 @@ app.get('/art.bmp', authMiddleware, (req: Request, res: Response) => {
         return;
     }
 
-    res.set('Content-Type', 'image/bmp');
+    res.set('Content-Type', 'image/jpeg');
     res.send(art);
 });
 
+// Refresh token interval remains the same
 setInterval(async () => {
     for (const [userId, tokens] of tokenStore) {
         if (Date.now() > tokens.expires_at - 300000) {
